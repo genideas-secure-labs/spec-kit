@@ -3,6 +3,21 @@
   "updated_at": "2026-04-10T00:00:00Z",
   "catalog_url": "https://raw.githubusercontent.com/github/spec-kit/main/presets/catalog.json",
   "presets": {
+    "dokkaebi-workflow": {
+      "name": "Dokkaebi Workflow",
+      "id": "dokkaebi-workflow",
+      "version": "1.0.0",
+      "description": "AW and Dokkaebi-oriented workflow commands for prepare, review, verify, and full-auto execution",
+      "author": "genideas-labs",
+      "repository": "https://github.com/genideas-secure-labs/spec-kit",
+      "bundled": true,
+      "tags": [
+        "dokkaebi",
+        "aw",
+        "workflow",
+        "review"
+      ]
+    },
     "lean": {
       "name": "Lean Workflow",
       "id": "lean",

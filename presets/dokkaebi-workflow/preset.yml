@@ -1,0 +1,46 @@
+schema_version: "1.0"
+
+preset:
+  id: "dokkaebi-workflow"
+  name: "Dokkaebi Workflow"
+  version: "1.0.0"
+  description: "AW and Dokkaebi-oriented workflow commands for prepare, review, verify, and full-auto execution"
+  author: "genideas-labs"
+  repository: "https://github.com/genideas-secure-labs/spec-kit"
+  license: "MIT"
+
+requires:
+  speckit_version: ">=0.8.0"
+
+provides:
+  templates:
+    - type: "command"
+      name: "speckit.prepare"
+      file: "commands/speckit.prepare.md"
+      description: "Prepare a spec for implementation with clarify, checklist, plan, tasks, and analyze"
+
+    - type: "command"
+      name: "speckit.verify"
+      file: "commands/speckit.verify.md"
+      description: "Verify implementation evidence against a selected spec"
+
+    - type: "command"
+      name: "speckit.guide"
+      file: "commands/speckit.guide.md"
+      description: "Generate guide.md for a completed spec"
+
+    - type: "command"
+      name: "speckit.full-auto"
+      file: "commands/speckit.full-auto.md"
+      description: "Run the end-to-end prepare, review, implement, review, and PR pipeline"
+
+    - type: "command"
+      name: "speckit.auto-review"
+      file: "commands/speckit.auto-review.md"
+      description: "Run the repo's safe post-implement Dokkaebi review wrapper"
+
+tags:
+  - "dokkaebi"
+  - "aw"
+  - "workflow"
+  - "review"
