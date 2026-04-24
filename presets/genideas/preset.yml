@@ -1,0 +1,97 @@
+schema_version: "1.0"
+
+preset:
+  id: "genideas"
+  name: "Genideas Daily Workflow"
+  version: "1.0.0"
+  description: "genideas-labs 데일리 워크플로우 전체 15개 speckit 커맨드. Claude Code user-invocable 스킬 포맷으로 Mac/Windows 동일하게 동작."
+  author: "genideas-labs"
+  repository: "https://github.com/genideas-secure-labs/spec-kit"
+  license: "MIT"
+
+requires:
+  speckit_version: ">=0.8.0"
+
+provides:
+  templates:
+    - type: "command"
+      name: "speckit.analyze"
+      file: "commands/speckit.analyze.md"
+      description: "Non-destructive cross-artifact consistency analysis with severity-based findings and remediation"
+
+    - type: "command"
+      name: "speckit.auto-review"
+      file: "commands/speckit.auto-review.md"
+      description: "Run focused Codex CLI review on spec artifacts or implementation. CRITICAL + HIGH by default"
+
+    - type: "command"
+      name: "speckit.auto-review-strict"
+      file: "commands/speckit.auto-review-strict.md"
+      description: "Strict variant of auto-review — reports and auto-fixes findings down to LOW severity"
+
+    - type: "command"
+      name: "speckit.checklist"
+      file: "commands/speckit.checklist.md"
+      description: "Generate quality checklist — unit tests for English that validate requirement quality"
+
+    - type: "command"
+      name: "speckit.clarify"
+      file: "commands/speckit.clarify.md"
+      description: "Identify and resolve ambiguities via targeted Q&A with mandatory tradeoff tables"
+
+    - type: "command"
+      name: "speckit.constitution"
+      file: "commands/speckit.constitution.md"
+      description: "Create or update project governing principles (CONSTITUTION.md)"
+
+    - type: "command"
+      name: "speckit.full-auto"
+      file: "commands/speckit.full-auto.md"
+      description: "End-to-end autonomous pipeline: prepare → auto-review-strict → implement → auto-review-strict → postmortem → merge confirm"
+
+    - type: "command"
+      name: "speckit.guide"
+      file: "commands/speckit.guide.md"
+      description: "Generate execution guide (guide.md) for a completed spec"
+
+    - type: "command"
+      name: "speckit.implement"
+      file: "commands/speckit.implement.md"
+      description: "Execute implementation by processing all tasks from tasks.md"
+
+    - type: "command"
+      name: "speckit.plan"
+      file: "commands/speckit.plan.md"
+      description: "Create technical implementation plan with architecture decisions, research, and design contracts"
+
+    - type: "command"
+      name: "speckit.prepare"
+      file: "commands/speckit.prepare.md"
+      description: "Full spec preparation pipeline: specify → clarify → checklist → plan → tasks → analyze → commit → GitHub"
+
+    - type: "command"
+      name: "speckit.specify"
+      file: "commands/speckit.specify.md"
+      description: "Create a new numbered spec from a feature description, or review/fill gaps in an existing spec"
+
+    - type: "command"
+      name: "speckit.tasks"
+      file: "commands/speckit.tasks.md"
+      description: "Generate dependency-ordered implementation tasks with parallel tracks and strict checklist format"
+
+    - type: "command"
+      name: "speckit.taskstoissues"
+      file: "commands/speckit.taskstoissues.md"
+      description: "Convert tasks.md into GitHub issues with labels and dependencies"
+
+    - type: "command"
+      name: "speckit.verify"
+      file: "commands/speckit.verify.md"
+      description: "Verify implementation against spec requirements"
+
+tags:
+  - "genideas"
+  - "daily"
+  - "workflow"
+  - "full-auto"
+  - "claude-code"

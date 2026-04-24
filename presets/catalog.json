@@ -18,6 +18,22 @@
         "review"
       ]
     },
+    "genideas": {
+      "name": "Genideas Daily Workflow",
+      "id": "genideas",
+      "version": "1.0.0",
+      "description": "genideas-labs 데일리 워크플로우 전체 15개 speckit 커맨드. Claude Code user-invocable 스킬 포맷으로 Mac/Windows 동일하게 동작.",
+      "author": "genideas-labs",
+      "repository": "https://github.com/genideas-secure-labs/spec-kit",
+      "bundled": true,
+      "tags": [
+        "genideas",
+        "daily",
+        "workflow",
+        "full-auto",
+        "claude-code"
+      ]
+    },
     "lean": {
       "name": "Lean Workflow",
       "id": "lean",
