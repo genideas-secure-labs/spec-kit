@@ -4,7 +4,6 @@ Copilot has several unique behaviors compared to standard markdown agents:
 - Commands use ``.agent.md`` extension (not ``.md``)
 - Each command gets a companion ``.prompt.md`` file in ``.github/prompts/``
 - Installs ``.vscode/settings.json`` with prompt file recommendations
-- Context file lives at ``.github/copilot-instructions.md``
 
 When ``--skills`` is passed via ``--integration-options``, Copilot scaffolds
 commands as ``speckit-<name>/SKILL.md`` directories under ``.github/skills/``
@@ -58,6 +57,17 @@ def _allow_all() -> bool:
     return True
 
 
+def _warn_legacy_markdown_default() -> None:
+    """Warn that Copilot's default markdown scaffold is being phased out."""
+    warnings.warn(
+        "Copilot legacy markdown mode is deprecated and will stop being the "
+        'default in a future Spec Kit release; pass --integration-options "--skills" '
+        "to opt in to Copilot skills mode now.",
+        UserWarning,
+        stacklevel=3,
+    )
+
+
 class _CopilotSkillsHelper(SkillsIntegration):
     """Internal helper used when Copilot is scaffolded in skills mode.
 
@@ -79,7 +89,6 @@ class _CopilotSkillsHelper(SkillsIntegration):
         "args": "$ARGUMENTS",
         "extension": "/SKILL.md",
     }
-    context_file = ".github/copilot-instructions.md"
 
 
 class CopilotIntegration(IntegrationBase):
@@ -108,13 +117,27 @@ class CopilotIntegration(IntegrationBase):
         "args": "$ARGUMENTS",
         "extension": ".agent.md",
     }
-    context_file = ".github/copilot-instructions.md"
+
+    CANONICAL_TO_NATIVE = {
+        "session_start": "sessionStart",
+        "pre_tool_use": "preToolUse",
+        "post_tool_use": "postToolUse",
+        "session_end": "sessionEnd",
+        "user_prompt_submit": "userPromptSubmitted",
+        # Copilot CLI supports the canonical per-turn stop lifecycle as native
+        # agentStop (U3); mapping it so an extension's stop handler fires.
+        "stop": "agentStop",
+    }
+    events_config_file = ".github/hooks/speckit.json"
+    events_format = "copilot-json"
 
     # Mutable flag set by setup() — indicates the active scaffolding mode.
     _skills_mode: bool = False
 
     def effective_invoke_separator(
-        self, parsed_options: dict[str, Any] | None = None
+        self,
+        parsed_options: dict[str, Any] | None = None,
+        project_root: Path | None = None,
     ) -> str:
         """Return ``"-"`` when skills mode is requested, ``"."`` otherwise."""
         if parsed_options and parsed_options.get("skills"):
@@ -123,16 +146,48 @@ class CopilotIntegration(IntegrationBase):
             return "-"
         return self.invoke_separator
 
+    def is_skills_mode(
+        self,
+        parsed_options: dict[str, Any] | None = None,
+        project_root: Path | None = None,
+    ) -> bool:
+        """Copilot is skills mode when ``--skills`` was requested.
+
+        On the init path ``setup()`` has already recorded the choice in
+        ``self._skills_mode``; on the ``use``/``install`` path (where no
+        ``setup()`` runs) the signal comes from *parsed_options* (#3550), which
+        round-trips because ``--skills`` is persisted in the stored options.
+        """
+        if parsed_options and parsed_options.get("skills"):
+            return True
+        return self._skills_mode
+
+    def invoke_separator_for_mode(self, skills_enabled: bool) -> str:
+        """Skills projects render ``/speckit-<cmd>``; default markdown ``.``.
+
+        Copilot is dual-layout, so — like Bob — the command-reference
+        separator depends on the persisted ``ai_skills`` state rather than a
+        single static value.  This keeps preset/extension command refs in a
+        Copilot skills project consistent with ``build_command_invocation``
+        (which emits ``/speckit-<stem>``).
+        """
+        return "-" if skills_enabled else self.invoke_separator
+
     @classmethod
     def options(cls) -> list[IntegrationOption]:
-        return [
+        # Compose with super() so the base class declares --events for this
+        # event-capable integration; otherwise --integration-options
+        # "--events false" is rejected as unknown (#9).
+        opts = super().options()
+        opts.append(
             IntegrationOption(
                 "--skills",
                 is_flag=True,
                 default=False,
                 help="Scaffold commands as agent skills (speckit-<name>/SKILL.md) instead of .agent.md files",
             ),
-        ]
+        )
+        return opts
 
     def _resolve_executable(self) -> str:
         """Return the Copilot CLI executable, respecting the env-var override.
@@ -282,6 +337,19 @@ class CopilotIntegration(IntegrationBase):
         """Copilot commands use ``.agent.md`` extension."""
         return f"speckit.{template_name}.agent.md"
 
+    def stale_cleanup_exclusions(self) -> set[str]:
+        """Protect ``.vscode/settings.json`` from upgrade stale-deletion.
+
+        ``setup()`` records this file in the manifest only when it creates it;
+        when it already exists the file is merged and intentionally left
+        untracked.  On upgrade the untracked-but-existing file would otherwise
+        be flagged stale and deleted, destroying user settings (and the file
+        the integration still manages).
+        """
+        exclusions = super().stale_cleanup_exclusions()
+        exclusions.add(".vscode/settings.json")
+        return exclusions
+
     def post_process_skill_content(self, content: str) -> str:
         """Inject shared hook guidance into Copilot skill content.
 
@@ -307,8 +375,18 @@ class CopilotIntegration(IntegrationBase):
         parsed_options = parsed_options or {}
         self._skills_mode = bool(parsed_options.get("skills"))
         if self._skills_mode:
-            return self._setup_skills(project_root, manifest, parsed_options, **opts)
-        return self._setup_default(project_root, manifest, parsed_options, **opts)
+            created = self._setup_skills(project_root, manifest, parsed_options, **opts)
+        else:
+            if "skills" not in parsed_options:
+                _warn_legacy_markdown_default()
+            created = self._setup_default(project_root, manifest, parsed_options, **opts)
+
+        # Install agent runtime events
+        event_files = self.emit_events(
+            project_root, manifest, events=opts.get("events"), parsed_options=parsed_options
+        )
+        created.extend(event_files)
+        return created
 
     def _setup_default(
         self,
@@ -329,6 +407,10 @@ class CopilotIntegration(IntegrationBase):
         if not templates:
             return []
 
+        from ...presets import PresetResolver
+
+        preset_resolver = PresetResolver(project_root_resolved)
+
         dest = self.commands_dest(project_root)
         dest_resolved = dest.resolve()
         try:
@@ -346,10 +428,14 @@ class CopilotIntegration(IntegrationBase):
 
         # 1. Process and write command files as .agent.md
         for src_file in templates:
-            raw = src_file.read_text(encoding="utf-8")
+            resolved_template = preset_resolver.resolve(
+                f"speckit.{src_file.stem}", template_type="command"
+            )
+            source_path = resolved_template or src_file
+            raw = source_path.read_text(encoding="utf-8")
             processed = self.process_template(
                 raw, self.key, script_type, arg_placeholder,
-                context_file=self.context_file or "",
+                project_root=project_root,
             )
             dst_name = self.command_filename(src_file.stem)
             dst_file = self.write_file_and_record(
@@ -384,8 +470,6 @@ class CopilotIntegration(IntegrationBase):
                 self.record_file_in_manifest(dst_settings, project_root, manifest)
                 created.append(dst_settings)
 
-        # 4. Upsert managed context section into the agent context file
-        self.upsert_context_section(project_root)
 
         return created
 
@@ -441,7 +525,7 @@ class CopilotIntegration(IntegrationBase):
         """
         try:
             existing = json.loads(dst.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
             # Cannot parse existing file (likely JSONC with comments).
             # Skip merge to preserve the user's settings, but show
             # what they should add manually.

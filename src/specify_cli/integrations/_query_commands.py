@@ -1,10 +1,12 @@
-"""specify integration list/use/search/info + catalog list/add/remove command handlers."""
+"""specify integration list/status/use/search/info + catalog list/add/remove command handlers."""
 from __future__ import annotations
 
+import json
 import os
-from typing import Optional
+from typing import Any, Optional
 
 import typer
+from rich.markup import escape as _rich_escape
 from rich.table import Table
 
 from .._console import console
@@ -15,6 +17,8 @@ from ..integration_state import (
 from ._commands import integration_app, integration_catalog_app
 from ._helpers import (
     _read_integration_json,
+    _register_extensions_for_agent,
+    _register_presets_for_agent,
     _resolve_integration_options,
     _set_default_integration_or_exit,
 )
@@ -120,6 +124,86 @@ def integration_list(
         console.print("Install one with: [cyan]specify integration install <key>[/cyan]")
 
 
+def _print_integration_status_report(report: dict[str, Any]) -> None:
+    status = report["status"]
+    status_label = {
+        "ok": "[green]OK[/green]",
+        "warning": "[yellow]WARNING[/yellow]",
+        "error": "[red]ERROR[/red]",
+    }.get(str(status), str(status).upper())
+    installed = report.get("installed_integrations") or []
+    installed_display = ", ".join(_rich_escape(str(item)) for item in installed)
+
+    console.print(f"Integration status: {status_label}")
+    console.print(
+        f"Default integration: {_rich_escape(str(report.get('default_integration') or 'none'))}"
+    )
+    console.print(f"Installed integrations: {installed_display if installed else 'none'}")
+    multi_install_safe = report.get("multi_install_safe")
+    if multi_install_safe is None:
+        multi_install_safe_display = "unknown"
+    else:
+        multi_install_safe_display = "yes" if multi_install_safe else "no"
+    console.print(f"Multi-install safe: {multi_install_safe_display}")
+    console.print(
+        f"Shared templates target alignment: "
+        f"{_rich_escape(str(report.get('shared_templates_target_alignment') or 'none'))}"
+    )
+    console.print(f"Modified managed files: {report.get('modified_managed_files', 0)}")
+    console.print(f"Missing managed files: {report.get('missing_managed_files', 0)}")
+    console.print(f"Invalid manifest paths: {report.get('invalid_manifest_paths', 0)}")
+    console.print(f"Unchecked manifests: {report.get('unchecked_manifests', 0)}")
+
+    findings = report.get("findings") or []
+    if not findings:
+        return
+
+    console.print()
+    console.print("[bold]Findings:[/bold]")
+    for item in findings:
+        severity = item.get("severity", "")
+        severity_label = {
+            "error": "[red]error[/red]",
+            "warning": "[yellow]warning[/yellow]",
+        }.get(severity, severity)
+        prefix = f"- {severity_label} {_rich_escape(str(item.get('code', '')))}"
+        if item.get("integration"):
+            prefix += f" ({_rich_escape(str(item['integration']))})"
+        console.print(
+            f"{prefix}: {_rich_escape(str(item.get('message', '')))}",
+            soft_wrap=True,
+        )
+        if item.get("suggestion"):
+            console.print(
+                f"  Suggestion: {_rich_escape(str(item['suggestion']))}",
+                soft_wrap=True,
+            )
+
+
+@integration_app.command("status")
+def integration_status(
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit machine-readable integration status.",
+    ),
+):
+    """Report the current project's integration status without changing files."""
+    from .. import _require_specify_project
+    from ..integration_status import build_integration_status_report
+
+    project_root = _require_specify_project()
+    report = build_integration_status_report(project_root)
+
+    if json_output:
+        typer.echo(json.dumps(report, indent=2))
+    else:
+        _print_integration_status_report(report)
+
+    if report["status"] == "error":
+        raise typer.Exit(1)
+
+
 @integration_app.command("use")
 def integration_use(
     key: str = typer.Argument(help="Installed integration key to make the default"),
@@ -159,6 +243,16 @@ def integration_use(
             "To overwrite customizations, re-run with "
             f"[cyan]specify integration use {key} --force[/cyan]."
         ),
+    )
+    _register_extensions_for_agent(
+        project_root,
+        key,
+        continuing="The integration was selected, but installed extensions may need re-registration.",
+    )
+    _register_presets_for_agent(
+        project_root,
+        key,
+        continuing="The integration was selected, but installed presets may need re-registration.",
     )
     console.print(f"[green]✓[/green] Default integration set to [bold]{key}[/bold].")
 
@@ -224,22 +318,26 @@ def integration_search(
 
     console.print(f"\n[green]Found {len(results)} integration(s):[/green]\n")
     for integ in sorted(results, key=lambda e: e.get("id", "")):
-        iid = integ.get("id", "?")
-        name = integ.get("name", iid)
-        version = integ.get("version", "?")
+        iid_value = str(integ.get("id", "?"))
+        iid = _rich_escape(iid_value)
+        name = _rich_escape(str(integ.get("name", iid_value)))
+        version = _rich_escape(str(integ.get("version", "?")))
         console.print(f"[bold]{name}[/bold] ({iid}) v{version}")
         desc = integ.get("description", "")
         if desc:
-            console.print(f"  {desc}")
+            console.print(f"  {_rich_escape(str(desc))}")
 
-        console.print(f"\n  [dim]Author:[/dim] {integ.get('author', 'Unknown')}")
+        author_value = _rich_escape(str(integ.get("author", "Unknown")))
+        console.print(f"\n  [dim]Author:[/dim] {author_value}")
         tags = integ.get("tags", [])
         if isinstance(tags, list) and tags:
-            console.print(f"  [dim]Tags:[/dim] {', '.join(str(t) for t in tags)}")
+            safe_tags = _rich_escape(", ".join(str(t) for t in tags))
+            console.print(f"  [dim]Tags:[/dim] {safe_tags}")
 
-        cat_name = integ.get("_catalog_name", "")
+        cat_name_value = integ.get("_catalog_name", "")
+        cat_name = _rich_escape(str(cat_name_value))
         install_allowed = integ.get("_install_allowed", True)
-        if cat_name:
+        if cat_name_value:
             if install_allowed:
                 console.print(f"  [dim]Catalog:[/dim] {cat_name}")
             else:
@@ -248,9 +346,9 @@ def integration_search(
                     "[yellow](discovery only — not installable)[/yellow]"
                 )
 
-        if iid == installed_key:
+        if iid_value == installed_key:
             console.print("\n  [green]✓ Installed[/green] (currently active)")
-        elif iid in INTEGRATION_REGISTRY:
+        elif iid_value in INTEGRATION_REGISTRY:
             console.print(f"\n  [cyan]Install:[/cyan] specify integration install {iid}")
         elif install_allowed:
             console.print(
@@ -280,6 +378,7 @@ def integration_info(
     project_root = _require_specify_project()
     catalog = IntegrationCatalog(project_root)
     installed_key = _default_integration_key(_read_integration_json(project_root))
+    safe_integration_id = _rich_escape(str(integration_id))
 
     try:
         info = catalog.get_integration_info(integration_id)
@@ -292,29 +391,38 @@ def integration_info(
         catalog_error = None
 
     if info:
-        name = info.get("name", integration_id)
-        version = info.get("version", "?")
-        console.print(f"\n[bold cyan]{name}[/bold cyan] ({integration_id}) v{version}")
+        name = _rich_escape(str(info.get("name", integration_id)))
+        version = _rich_escape(str(info.get("version", "?")))
+        console.print(
+            f"\n[bold cyan]{name}[/bold cyan] ({safe_integration_id}) v{version}"
+        )
         if info.get("description"):
-            console.print(f"  {info['description']}")
+            console.print(f"  {_rich_escape(str(info['description']))}")
         console.print()
 
-        console.print(f"  [dim]Author:[/dim] {info.get('author', 'Unknown')}")
+        author_value = _rich_escape(str(info.get("author", "Unknown")))
+        console.print(f"  [dim]Author:[/dim] {author_value}")
         if info.get("license"):
-            console.print(f"  [dim]License:[/dim] {info['license']}")
+            console.print(
+                f"  [dim]License:[/dim] {_rich_escape(str(info['license']))}"
+            )
 
         tags = info.get("tags", [])
         if isinstance(tags, list) and tags:
-            console.print(f"  [dim]Tags:[/dim] {', '.join(str(t) for t in tags)}")
+            safe_tags = _rich_escape(", ".join(str(t) for t in tags))
+            console.print(f"  [dim]Tags:[/dim] {safe_tags}")
 
-        cat_name = info.get("_catalog_name", "")
+        cat_name_value = info.get("_catalog_name", "")
+        cat_name = _rich_escape(str(cat_name_value))
         install_allowed = info.get("_install_allowed", True)
-        if cat_name:
+        if cat_name_value:
             install_note = "" if install_allowed else " [yellow](discovery only)[/yellow]"
             console.print(f"  [dim]Source catalog:[/dim] {cat_name}{install_note}")
 
         if info.get("repository"):
-            console.print(f"  [dim]Repository:[/dim] {info['repository']}")
+            console.print(
+                f"  [dim]Repository:[/dim] {_rich_escape(str(info['repository']))}"
+            )
 
         if integration_id == installed_key:
             console.print("\n  [green]✓ Installed[/green] (currently active)")
@@ -350,7 +458,7 @@ def integration_info(
         else:
             console.print("\nTry again when online, or use a built-in integration ID directly.")
     else:
-        console.print(f"[red]Error:[/red] Integration '{integration_id}' not found")
+        console.print(f"[red]Error:[/red] Integration '{safe_integration_id}' not found")
         console.print("\nTry: specify integration search")
     raise typer.Exit(1)
 
@@ -401,13 +509,14 @@ def integration_catalog_list():
         display_name = str(raw_name).strip() if raw_name is not None else ""
         if not display_name:
             display_name = f"catalog-{i + 1}"
+        safe_name = _rich_escape(display_name)
         if env_override or project_configs is None:
-            console.print(f"  - [bold]{display_name}[/bold] — {install_status}")
+            console.print(f"  - [bold]{safe_name}[/bold] — {install_status}")
         else:
-            console.print(f"  [{i}] [bold]{display_name}[/bold] — {install_status}")
-        console.print(f"      {cfg.get('url', '')}")
+            console.print(f"  [{i}] [bold]{safe_name}[/bold] — {install_status}")
+        console.print(f"      {_rich_escape(str(cfg.get('url', '')))}")
         if cfg.get("description"):
-            console.print(f"      [dim]{cfg['description']}[/dim]")
+            console.print(f"      [dim]{_rich_escape(str(cfg['description']))}[/dim]")
         console.print()
 
 
