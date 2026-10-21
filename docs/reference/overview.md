@@ -8,11 +8,29 @@ The foundational commands for creating and managing Spec Kit projects. Initializ
 
 [Core Commands reference →](core.md)
 
+## MCP Server
+
+The experimental `specify mcp` command exposes stable CLI JSON commands to MCP
+clients through a local stdio server.
+
+[MCP Server reference →](mcp.md)
+
 ## Integrations
 
 Integrations connect Spec Kit to your AI coding agent. Each integration sets up the appropriate command files and directory structures for a specific agent. Only one integration is active per project at a time, and you can switch between them at any point.
 
-[Integrations reference →](integrations.md)
+[Agent-specific setup guides →](../integrations/index.md)
+
+[Integration management reference →](../integrations/cli.md)
+
+## Catalogs
+
+Catalogs are priority-ordered indexes for discovering integrations, extensions,
+presets, workflows, workflow step types, and bundles. Spec Kit includes
+built-in sources and supports private, organization-managed catalogs with
+explicit discovery and installation policies.
+
+[Catalogs reference →](catalogs.md)
 
 ## Extensions
 
@@ -25,6 +43,12 @@ Extensions add new capabilities to Spec Kit — domain-specific commands, extern
 Presets customize how Spec Kit works — overriding command files, template files, and script files without changing any tooling. They let you enforce organizational standards, adapt the workflow to your methodology, or localize the entire experience. Multiple presets can be stacked with priority ordering to layer customizations.
 
 [Presets reference →](presets.md)
+
+## Artifacts
+
+Artifacts are the commands, templates, and scripts a project exposes, whichever layer contributes them. The `specify artifact` command group is the read-only introspection surface over that inventory — a flat list of everything visible, plus the full composition stack behind any single entry, including which layer wins and which layers are hidden.
+
+[Artifacts reference →](artifacts.md)
 
 ## Workflows
 
@@ -40,7 +64,12 @@ Bundles compose existing extensions, presets, workflows, and steps into a single
 
 ## Agentic Commands
 
-The sections above cover primitives managed by the `specify` CLI. The following are the `/speckit.*` slash commands your coding agent runs step by step inside the editor — the agentic processes built on top of that foundation.
+The sections above cover primitives managed by the `specify` CLI. The following
+are independent processes your coding agent runs, not terminal commands. The
+references use `/speckit.*` notation; see
+[Command invocation](../integrations/cli.md#command-invocation) for your agent's syntax.
+For guided examples, start with [SDD](../quickstart.md),
+[bug fixing](../guides/bugfix.md), or [idea assessment](../guides/assessment.md).
 
 ### Agentic SDD
 
@@ -53,3 +82,12 @@ The `/speckit.*` slash commands that drive the core Spec-Driven Development proc
 The bundled **bug** extension adds a three-step bug triage process — assess, fix, and validate — with each bug tracked in its own directory under `.specify/bugs/`. Install it with `specify extension add bug`.
 
 [Agentic Bug Fix reference →](agentic-bugfix.md)
+
+### Agentic Idea Assessment
+
+The bundled, opt-in **assess** extension evaluates an idea through intake,
+research, definition, shaping, and a go / needs-clarification / kill decision.
+It works without source code and does not require or automatically start SDD.
+Install it with `specify extension add assess`.
+
+[Agentic Idea Assessment reference →](agentic-assessment.md)
