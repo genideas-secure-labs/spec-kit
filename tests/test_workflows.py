@@ -1515,6 +1515,203 @@ class TestExpressions:
         result = evaluate_expression("RUN_ID={{ context.run_id }}", ctx)
         assert result == "RUN_ID=deadbeef"
 
+    def test_comparison_greater_equal_and_less_equal(self):
+        """``>=``/``<=`` evaluate like ``>``/``<``, for every operand shape.
+
+        The operators were in ``_COMPARISON_OPERATORS`` and handed to
+        ``_safe_compare``, but no test evaluated them, so the ``>=``/``<=``
+        branches and their ordering relative to the single-char operators were
+        unpinned.
+        """
+        from specify_cli.workflows.expressions import evaluate_expression
+        from specify_cli.workflows.base import StepContext
+
+        ctx = StepContext(inputs={"n": 5, "s10": "10", "s9": "9", "lo": "alpha", "hi": "beta"})
+        assert evaluate_expression("{{ inputs.n >= 5 }}", ctx) is True
+        assert evaluate_expression("{{ inputs.n <= 5 }}", ctx) is True
+        assert evaluate_expression("{{ inputs.n >= 6 }}", ctx) is False
+        assert evaluate_expression("{{ inputs.n <= 4 }}", ctx) is False
+        # Numeric strings still compare as numbers ("10" >= "9", not lexically).
+        assert evaluate_expression("{{ inputs.s10 >= inputs.s9 }}", ctx) is True
+        assert evaluate_expression("{{ inputs.s9 <= inputs.s10 }}", ctx) is True
+        # Non-numeric strings compare lexicographically.
+        assert evaluate_expression("{{ inputs.hi >= inputs.lo }}", ctx) is True
+        assert evaluate_expression("{{ inputs.lo <= inputs.hi }}", ctx) is True
+        # A number against a non-numeric string is incomparable -> False.
+        assert evaluate_expression("{{ inputs.n >= 'abc' }}", ctx) is False
+        assert evaluate_expression("{{ inputs.n <= 'abc' }}", ctx) is False
+
+    def test_boolean_literals_are_case_insensitive(self):
+        """``{{ True }}``/``{{ TRUE }}`` resolve as booleans, as the ``.lower()``
+        branch intends; only lowercase was pinned before."""
+        from specify_cli.workflows.expressions import evaluate_expression
+        from specify_cli.workflows.base import StepContext
+
+        ctx = StepContext()
+        for literal in ("True", "TRUE"):
+            assert evaluate_expression("{{ " + literal + " }}", ctx) is True, literal
+        for literal in ("False", "FALSE"):
+            assert evaluate_expression("{{ " + literal + " }}", ctx) is False, literal
+
+    def test_null_literals(self):
+        """``none``/``null`` (any case) resolve to ``None``, not to a path."""
+        from specify_cli.workflows.expressions import _collect_leaves, evaluate_expression
+        from specify_cli.workflows.base import StepContext
+
+        ctx = StepContext()
+        for literal in ("none", "null", "None", "NULL", "nUlL"):
+            assert evaluate_expression("{{ " + literal + " }}", ctx) is None, literal
+            assert _collect_leaves(literal) == [], literal
+
+    def test_filter_map_dot_path_attribute(self):
+        """``map('a.b')`` walks nested dicts, not just a top-level key."""
+        from specify_cli.workflows.expressions import evaluate_expression
+        from specify_cli.workflows.base import StepContext
+
+        ctx = StepContext(
+            inputs={"rows": [{"result": {"status": "ok"}}, {"result": {"status": "bad"}}]}
+        )
+        assert evaluate_expression(
+            "{{ inputs.rows | map('result.status') }}", ctx
+        ) == ["ok", "bad"]
+        # A missing branch of the path yields None for that element, as for a
+        # missing top-level key.
+        ctx_missing = StepContext(inputs={"rows": [{"result": {"status": "ok"}}, {}]})
+        assert evaluate_expression(
+            "{{ inputs.rows | map('result.status') }}", ctx_missing
+        ) == ["ok", None]
+
+    def test_filter_default_on_empty_string(self):
+        """``default`` fires for an empty string too, not only for ``None``.
+
+        ``_filter_default`` treats both as absent; only the ``None`` half was
+        covered. Other falsy values (0, False, [], {}) are preserved.
+        """
+        from specify_cli.workflows.expressions import evaluate_expression
+        from specify_cli.workflows.base import StepContext
+
+        ctx = StepContext(
+            inputs={
+                "empty": "",
+                "value": "kept",
+                "missing": None,
+                "zero": 0,
+                "boolean": False,
+                "empty_list": [],
+                "empty_dict": {},
+            }
+        )
+        assert evaluate_expression("{{ inputs.empty | default('fb') }}", ctx) == "fb"
+        assert evaluate_expression("{{ inputs.missing | default('fb') }}", ctx) == "fb"
+        # A non-empty value is passed through unchanged.
+        assert evaluate_expression("{{ inputs.value | default('fb') }}", ctx) == "kept"
+        # Documented falsy values (0, False, [], {}) are passed through unchanged.
+        res_zero = evaluate_expression("{{ inputs.zero | default('fb') }}", ctx)
+        assert res_zero == 0 and res_zero is not False
+        assert evaluate_expression("{{ inputs.boolean | default('fb') }}", ctx) is False
+        assert evaluate_expression("{{ inputs.empty_list | default('fb') }}", ctx) == []
+        assert evaluate_expression("{{ inputs.empty_dict | default('fb') }}", ctx) == {}
+
+    def test_filter_from_json_returns_non_object_types(self):
+        """``from_json`` yields the parsed value for every JSON type, not only
+        objects: arrays, numbers, booleans and ``null``."""
+        from specify_cli.workflows.expressions import evaluate_expression
+        from specify_cli.workflows.base import StepContext
+
+        ctx = StepContext(
+            inputs={"arr": "[1, 2, 3]", "num": "42", "fnum": "1.5", "t": "true", "nl": "null"}
+        )
+        assert evaluate_expression("{{ inputs.arr | from_json }}", ctx) == [1, 2, 3]
+        assert evaluate_expression("{{ inputs.num | from_json }}", ctx) == 42
+        assert evaluate_expression("{{ inputs.fnum | from_json }}", ctx) == 1.5
+        assert evaluate_expression("{{ inputs.t | from_json }}", ctx) is True
+        assert evaluate_expression("{{ inputs.nl | from_json }}", ctx) is None
+
+    def test_filter_argument_resolved_from_namespace(self):
+        """A filter argument may be a namespace path, not only a literal."""
+        from specify_cli.workflows.expressions import evaluate_expression
+        from specify_cli.workflows.base import StepContext
+
+        ctx = StepContext(inputs={"tags": ["a", "b"], "sep": "-", "missing": None})
+        assert evaluate_expression("{{ inputs.tags | join(inputs.sep) }}", ctx) == "a-b"
+        assert evaluate_expression("{{ inputs.missing | default(inputs.sep) }}", ctx) == "-"
+
+    def test_boolean_precedence_without_parentheses(self):
+        """``and`` binds tighter than ``or``, so grouping is only needed to
+        override it. With a=True, b=False, c=False: ``a or (b and c)`` is True;
+        the wrong left-to-right reading ``(a or b) and c`` would be False."""
+        from specify_cli.workflows.expressions import evaluate_expression
+        from specify_cli.workflows.base import StepContext
+
+        ctx = StepContext(inputs={"a": True, "b": False, "c": False})
+        assert evaluate_expression("{{ inputs.a or inputs.b and inputs.c }}", ctx) is True
+        # Explicit grouping overrides the default and flips the result.
+        assert evaluate_expression("{{ (inputs.a or inputs.b) and inputs.c }}", ctx) is False
+
+    def test_item_and_fan_in_namespace(self):
+        """The ``item`` and ``fan_in`` roots resolve inside fan-out/fan-in, like
+        ``inputs``/``steps``/``context``. Only the diagnostics probed them."""
+        from specify_cli.workflows.expressions import evaluate_expression
+        from specify_cli.workflows.base import StepContext
+
+        ctx = StepContext(
+            inputs={"x": "y"}, item={"name": "n1"}, fan_in={"results": [1, 2]}
+        )
+        assert evaluate_expression("{{ item.name }}", ctx) == "n1"
+        assert evaluate_expression("{{ item }}", ctx) == {"name": "n1"}
+        assert evaluate_expression("{{ fan_in.results }}", ctx) == [1, 2]
+        assert evaluate_expression("{{ fan_in.results | join(', ') }}", ctx) == "1, 2"
+        # An item that is itself a list indexes like any other list root.
+        list_ctx = StepContext(inputs={"x": 1}, item=["x", "y"])
+        assert evaluate_expression("{{ item[0] }}", list_ctx) == "x"
+        assert evaluate_expression("{{ item[-1] }}", list_ctx) == "y"
+
+    def test_interpolation_with_steps_and_item(self):
+        """Interpolation resolves every root, not only ``inputs``/``context``."""
+        from specify_cli.workflows.expressions import evaluate_expression
+        from specify_cli.workflows.base import StepContext
+
+        ctx = StepContext(
+            steps={"emit": {"output": {"file": "a.md"}}}, item="row-1"
+        )
+        assert evaluate_expression("file={{ steps.emit.output.file }}", ctx) == "file=a.md"
+        assert evaluate_expression("item={{ item }}", ctx) == "item=row-1"
+
+    def test_empty_expression_block_is_empty_string(self):
+        """A block with no expression interpolates to ``""`` (and in a condition
+        coerces to False), rather than raising."""
+        from specify_cli.workflows.expressions import (
+            evaluate_condition,
+            evaluate_expression,
+        )
+        from specify_cli.workflows.base import StepContext
+
+        ctx = StepContext()
+        assert evaluate_expression("{{ }}", ctx) == ""
+        assert evaluate_condition("{{ }}", ctx) is False
+
+    def test_missing_intermediate_path_resolves_to_none(self):
+        """A path whose intermediate segment is absent resolves to ``None``
+        rather than raising."""
+        from specify_cli.workflows.expressions import evaluate_expression
+        from specify_cli.workflows.base import StepContext
+
+        ctx = StepContext(inputs={"a": {}})
+        assert evaluate_expression("{{ inputs.a.b }}", ctx) is None
+        assert evaluate_expression("{{ inputs.zzz.deep }}", ctx) is None
+
+    def test_whitespace_inside_and_around_block(self):
+        """Arbitrary whitespace around tokens is insignificant; none inside a
+        quoted operand is not."""
+        from specify_cli.workflows.expressions import evaluate_expression
+        from specify_cli.workflows.base import StepContext
+
+        ctx = StepContext(inputs={"n": 5, "missing": None})
+        assert evaluate_expression("{{inputs.n}}", ctx) == 5
+        assert evaluate_expression("{{   inputs.n   }}", ctx) == 5
+        assert evaluate_expression("{{ inputs.missing | default( 'y' ) }}", ctx) == "y"
+        assert evaluate_expression("{{ inputs.missing|default('y') }}", ctx) == "y"
+
 
 # ===== Integration Dispatch Tests =====
 
@@ -2154,6 +2351,49 @@ class TestCommandStep:
         assert call_args[0][0][1] == "-p"
         # Claude is a SkillsIntegration so uses /speckit-specify
         assert "/speckit-specify login" in call_args[0][0][2]
+
+    @pytest.mark.parametrize(
+        ("args", "expected_prompt"),
+        [
+            # A lone expression that resolves to None (an optional input that
+            # was not supplied, an output key the earlier step does not
+            # produce) means no arguments, as a missing 'args' key does.
+            ("{{ inputs.feature }}", "/speckit-plan"),
+            ("{{ steps.specify.output.file }}", "/speckit-plan"),
+            # Values that are only falsy are still dispatched.
+            ("{{ inputs.count }}", "/speckit-plan 0"),
+            ("{{ inputs.flag }}", "/speckit-plan False"),
+            ("{{ inputs.empty }}", "/speckit-plan"),
+            ("Feature: {{ inputs.name }}", "/speckit-plan Feature: login"),
+        ],
+    )
+    def test_dispatch_args_resolving_to_null_send_no_arguments(
+        self, tmp_path, args, expected_prompt
+    ):
+        from unittest.mock import patch, MagicMock
+        from specify_cli.workflows.step.command import CommandStep
+        from specify_cli.workflows.base import StepContext, StepStatus
+
+        ctx = StepContext(
+            inputs={"count": 0, "flag": False, "empty": "", "name": "login"},
+            steps={"specify": {"output": {"exit_code": 0}}},
+            default_integration="claude",
+            project_root=str(tmp_path),
+        )
+        config = {"id": "plan", "command": "speckit.plan", "input": {"args": args}}
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = ""
+        mock_result.stderr = ""
+
+        with patch("specify_cli.workflows.step.command.shutil.which", return_value="/usr/local/bin/claude"), \
+             patch("specify_cli.integrations.base.shutil.which", return_value="/usr/local/bin/claude"), \
+             patch("subprocess.run", return_value=mock_result) as mock_run:
+            result = CommandStep().execute(config, ctx)
+
+        assert result.status == StepStatus.COMPLETED
+        assert mock_run.call_args[0][0][2] == expected_prompt
 
     def test_dispatch_uses_executable_override_for_fallback_preflight(self, tmp_path, monkeypatch):
         """Command preflight falls back to build_exec_args() argv[0]."""
@@ -2807,7 +3047,7 @@ class TestShellStep:
         def fake_run(*args, **kwargs):
             captured["timeout"] = kwargs.get("timeout")
             return subprocess.CompletedProcess(
-                args=args[0] if args else "", returncode=0, stdout="", stderr=""
+                args=args[0] if args else "", returncode=0, stdout=b"", stderr=b""
             )
 
         monkeypatch.setattr(subprocess, "run", fake_run)
@@ -2830,7 +3070,7 @@ class TestShellStep:
         def fake_run(*args, **kwargs):
             captured["timeout"] = kwargs.get("timeout")
             return subprocess.CompletedProcess(
-                args=args[0] if args else "", returncode=0, stdout="", stderr=""
+                args=args[0] if args else "", returncode=0, stdout=b"", stderr=b""
             )
 
         monkeypatch.setattr(subprocess, "run", fake_run)
@@ -3379,6 +3619,23 @@ class TestGateStep:
         assert result.status == StepStatus.PAUSED
         assert result.output["message"] == "Review the spec."
         assert result.output["options"] == ["approve", "reject"]
+
+    def test_message_expression_is_interpolated(self):
+        """A gate ``message`` containing ``{{ }}`` is evaluated against the
+        context before it is persisted, not shown verbatim."""
+        from specify_cli.workflows.step.gate import GateStep
+        from specify_cli.workflows.base import StepContext, StepStatus
+
+        result = GateStep().execute(
+            {
+                "id": "review",
+                "message": "Approve {{ inputs.feature }}?",
+                "options": ["approve", "reject"],
+            },
+            StepContext(inputs={"feature": "login"}),
+        )
+        assert result.status == StepStatus.PAUSED
+        assert result.output["message"] == "Approve login?"
 
     @pytest.mark.parametrize(
         "inputs", [{}, {"spec_verdict": None}, {"spec_verdict": ""}]
@@ -8667,6 +8924,156 @@ steps:
         assert name in raw
         assert "\\u" not in raw and "\\x" not in raw
         assert yaml.safe_load(raw)["workflow"]["name"] == name
+
+    _GATED = """
+schema_version: "1.0"
+workflow:
+  id: "gated"
+  name: "Gated"
+  version: "1.0.0"
+inputs:
+  verdict: {type: string, default: ""}
+steps:
+  - {id: ask, type: gate, message: "Review", verdict_input: verdict}
+"""
+
+    def _gated_run(self, project_dir):
+        from specify_cli.workflows.engine import WorkflowDefinition, WorkflowEngine
+
+        wf_dir = project_dir / ".specify" / "workflows" / "gated"
+        wf_dir.mkdir(parents=True)
+        wf_file = wf_dir / "workflow.yml"
+        wf_file.write_text(self._GATED, encoding="utf-8")
+        engine = WorkflowEngine(project_dir)
+        return engine, engine.execute(WorkflowDefinition.from_yaml(wf_file))
+
+    def test_definition_path_and_load_definition(self, project_dir):
+        from specify_cli.workflows.engine import RunState
+
+        _, state = self._gated_run(project_dir)
+        loaded = RunState.load(state.run_id, project_dir)
+        assert loaded.definition_path == loaded.runs_dir / "workflow.yml"
+        definition = loaded.load_definition()
+        assert definition.data == yaml.safe_load(self._GATED)
+
+    def test_load_definition_missing_snapshot_raises_file_not_found(self, project_dir):
+        _, state = self._gated_run(project_dir)
+        state.definition_path.unlink()
+        with pytest.raises(FileNotFoundError):
+            state.load_definition()
+
+    @pytest.mark.parametrize(
+        "content", [": : :\n  - [", "- a\n- b\n", "a: " + "[" * 100000]
+    )
+    def test_load_definition_rejects_corrupt_snapshot(self, project_dir, content):
+        _, state = self._gated_run(project_dir)
+        state.definition_path.write_text(content, encoding="utf-8")
+        with pytest.raises(ValueError):
+            state.load_definition()
+
+    def test_deeply_nested_yaml_raises_value_error(self, tmp_path):
+        from specify_cli.workflows.engine import WorkflowDefinition
+
+        nested = "a: " + "[" * 100000
+        path = tmp_path / "workflow.yml"
+        path.write_text(nested, encoding="utf-8")
+        with pytest.raises(ValueError, match="nested too deeply"):
+            WorkflowDefinition.from_yaml(path)
+        with pytest.raises(ValueError, match="nested too deeply"):
+            WorkflowDefinition.from_string(nested)
+
+    @pytest.mark.parametrize("name", ["state.json", "inputs.json"])
+    def test_run_state_load_deeply_nested_json_raises_value_error(
+        self, project_dir, name
+    ):
+        from specify_cli.workflows.engine import RunState
+
+        _, state = self._gated_run(project_dir)
+        target = state.runs_dir / name
+        if name == "inputs.json":
+            # inputs.json is only read when state.json carries no "inputs"
+            data = json.loads((state.runs_dir / "state.json").read_text("utf-8"))
+            data.pop("inputs", None)
+            (state.runs_dir / "state.json").write_text(json.dumps(data), "utf-8")
+        target.write_text("[" * 100000, encoding="utf-8")
+        with pytest.raises(ValueError):
+            RunState.load(state.run_id, project_dir)
+
+    def test_snapshot_storage_contract(self, project_dir):
+        """``runs/<id>/workflow.yml`` is read by ``resume`` and ``workflow
+        definition``: pin its location and persisted shape."""
+        _, state = self._gated_run(project_dir)
+        path = project_dir / ".specify" / "workflows" / "runs" / state.run_id / "workflow.yml"
+        assert state.definition_path == path
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert list(data) == ["schema_version", "workflow", "inputs", "steps"]
+        assert data == yaml.safe_load(self._GATED)
+        assert yaml.safe_load(yaml.safe_dump(data, sort_keys=False)) == data
+
+    def test_resume_uses_snapshot_when_installed_workflow_is_gone(self, project_dir):
+        from specify_cli.workflows.base import RunStatus
+
+        engine, state = self._gated_run(project_dir)
+        (project_dir / ".specify" / "workflows" / "gated" / "workflow.yml").unlink()
+        resumed = engine.resume(state.run_id, {"verdict": "approve"})
+        assert resumed.status == RunStatus.COMPLETED
+
+    def test_resume_falls_back_to_installed_workflow_without_snapshot(self, project_dir):
+        from specify_cli.workflows.base import RunStatus
+
+        engine, state = self._gated_run(project_dir)
+        state.definition_path.unlink()
+        resumed = engine.resume(state.run_id, {"verdict": "approve"})
+        assert resumed.status == RunStatus.COMPLETED
+
+    def test_load_workflow_scopes_without_tree_is_empty(self, project_dir):
+        from specify_cli.workflows.engine import RunState
+
+        state = RunState(run_id="plain", workflow_id="w", project_root=project_dir)
+        state.save()
+        assert RunState.load("plain", project_dir).load_workflow_scopes() == []
+
+    def test_load_workflow_scopes_matches_scope_summaries(self, project_dir):
+        from specify_cli.workflows._execution import scope_summaries
+        from specify_cli.workflows.catalog import WorkflowRegistry
+        from specify_cli.workflows.engine import (
+            RunState,
+            WorkflowDefinition,
+            WorkflowEngine,
+        )
+
+        child_dir = project_dir / ".specify" / "workflows" / "child"
+        child_dir.mkdir(parents=True)
+        (child_dir / "workflow.yml").write_text(
+            "workflow: {id: child, name: Child}\n"
+            "steps:\n  - {id: review, type: gate, message: Review}\n",
+            encoding="utf-8",
+        )
+        WorkflowRegistry(project_dir).add("child", {"enabled": True})
+        root = WorkflowDefinition({
+            "workflow": {"id": "parent", "name": "Parent"},
+            "steps": [{"id": "call", "type": "workflow", "workflow": "child"}],
+        })
+        state = WorkflowEngine(project_dir).execute(root)
+        loaded = RunState.load(state.run_id, project_dir)
+        scopes = loaded.load_workflow_scopes()
+        summaries = scope_summaries(loaded.execution, loaded.status.value)
+        assert [(p, w) for p, w, _ in scopes] == [
+            (s["scope_path"], s["workflow_id"]) for s in summaries
+        ] == [(["call"], "child")]
+        assert scopes[0][2].data["steps"][0]["id"] == "review"
+
+    @pytest.mark.parametrize(
+        "tree",
+        [{"version": 999, "sequence": {}}, {"version": 2}, "not-a-dict"],
+    )
+    def test_load_workflow_scopes_wraps_bad_tree_in_value_error(self, project_dir, tree):
+        from specify_cli.workflows.engine import RunState
+
+        state = RunState(run_id="bad", workflow_id="w", project_root=project_dir)
+        state.execution = tree
+        with pytest.raises(ValueError):
+            state.load_workflow_scopes()
 
     @pytest.mark.parametrize("invalid_step_results", [None, [], "invalid", 1, True])
     def test_load_rejects_non_object_step_results(
