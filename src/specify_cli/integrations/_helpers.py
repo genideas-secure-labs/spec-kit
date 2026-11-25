@@ -246,6 +246,27 @@ def _parse_integration_options(integration: Any, raw_options: str) -> dict[str, 
     return parsed or None
 
 
+def _preflight_setup_or_exit(
+    integration: Any,
+    project_root: Path,
+    parsed_options: dict[str, Any] | None,
+    script_type: str,
+    action: str,
+) -> None:
+    """Run ``integration.preflight_setup()`` and exit before any write on refusal."""
+    try:
+        integration.preflight_setup(
+            project_root, parsed_options, script_type=script_type
+        )
+    except (ValueError, OSError) as exc:
+        console.print(
+            f"[red]Error:[/red] Cannot {action} integration "
+            f"'{escape(integration.key)}': {escape(_cli_error_detail(exc))}"
+        )
+        console.print("No files were changed.")
+        raise typer.Exit(1) from exc
+
+
 def _resolve_integration_options(
     integration: Any,
     state: dict[str, Any],
@@ -399,6 +420,7 @@ def _register_extensions_for_agent(
     *,
     continuing: str,
     force: bool = False,
+    overwrite_modified: bool = False,
 ) -> None:
     """Register all enabled extensions' commands/skills for ``agent_key``.
 
@@ -424,7 +446,9 @@ def _register_extensions_for_agent(
     _best_effort_extension_op(
         project_root,
         agent_key,
-        lambda mgr, key: mgr.register_enabled_extensions_for_agent(key, force=force),
+        lambda mgr, key: mgr.register_enabled_extensions_for_agent(
+            key, force=force, overwrite_modified=overwrite_modified
+        ),
         phase="register extension artifacts for",
         continuing=continuing,
     )
@@ -435,17 +459,18 @@ def _unregister_extensions_for_agent(
     agent_key: str,
     *,
     continuing: str,
+    preserve_modified: bool = False,
 ) -> None:
     """Best-effort removal of ``agent_key``'s extension artifacts.
 
     Used by ``switch`` when uninstalling the previous integration so its
     extension command/skill files don't linger as orphans in the old agent's
-    directory.
+    directory. Unforced switches preserve edited native skill resources (#5366).
     """
     _best_effort_extension_op(
         project_root,
         agent_key,
-        lambda mgr, key: mgr.unregister_agent_artifacts(key),
+        lambda mgr, key: mgr.unregister_agent_artifacts(key, preserve_modified=preserve_modified),
         phase="clean up extension artifacts for",
         continuing=continuing,
     )

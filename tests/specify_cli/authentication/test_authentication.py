@@ -646,7 +646,6 @@ class TestGitHubAuth:
         run.assert_called_once_with(
             [executable, "auth", "token", "--hostname", "github.com"],
             capture_output=True,
-            text=True,
             timeout=10,
             check=False,
             shell=False,
@@ -1481,10 +1480,130 @@ class TestAuthenticatedHttp:
 # ---------------------------------------------------------------------------
 
 
+class TestInitialUrlSafety:
+    @pytest.mark.parametrize("helper", ["build_request", "open_url"])
+    @pytest.mark.parametrize("provider_key,scheme", [
+        ("github", "bearer"),
+        ("github", "github-cli"),
+        ("azure-devops", "basic-pat"),
+        ("bitbucket", "basic"),
+    ])
+    @pytest.mark.parametrize("url", [
+        "http://example.com/archive.zip",
+        "ftp://example.com/archive.zip",
+    ])
+    def test_rejects_cleartext_before_resolving_credentials(
+        self, monkeypatch, helper, provider_key, scheme, url,
+    ):
+        from unittest.mock import patch
+        from specify_cli.authentication import http
+
+        entry = AuthConfigEntry(
+            hosts=("example.com",), provider=provider_key, auth=scheme,
+            token="test-token", username="test-user",
+        )
+        monkeypatch.setattr(http, "_config_override", [entry])
+        provider = get_provider(provider_key)
+        assert provider is not None
+        token = "test-user:test-token" if scheme == "basic" else "test-token"
+        with patch.object(
+            provider, "resolve_token", return_value=token,
+        ) as resolve, patch.object(http.urllib.request, "build_opener") as build_opener:
+            with pytest.raises(http.URLPolicyError, match="HTTPS"):
+                getattr(http, helper)(url)
+            resolve.assert_not_called()
+            build_opener.assert_not_called()
+
+    @pytest.mark.parametrize("helper", ["build_request", "open_url"])
+    @pytest.mark.parametrize("url", [
+        "http://example.com/archive.zip",
+        "http://0.0.0.0/archive.zip",
+        "http://127.1/archive.zip",
+        "https:///archive.zip",
+        "https://[::1",
+        "https://example.com:invalid/archive.zip",
+        "file:///tmp/archive.zip",
+    ])
+    def test_rejects_unsafe_urls_without_auth_config(self, monkeypatch, helper, url):
+        from unittest.mock import patch
+        from specify_cli.authentication import http
+
+        monkeypatch.setattr(http, "_config_override", [])
+        with patch.object(http.urllib.request, "build_opener") as build_opener:
+            with pytest.raises(http.URLPolicyError, match="HTTPS"):
+                getattr(http, helper)(url)
+            build_opener.assert_not_called()
+
+    @pytest.mark.parametrize("helper", ["build_request", "open_url"])
+    @pytest.mark.parametrize("provider_key,scheme", [
+        ("github", "bearer"),
+        ("azure-devops", "basic-pat"),
+        ("bitbucket", "basic"),
+    ])
+    @pytest.mark.parametrize("url", [
+        "https://example.com/archive.zip",
+        "http://localhost:8000/archive.zip",
+        "http://127.0.0.1:8000/archive.zip",
+        "http://[::1]:8000/archive.zip",
+    ])
+    def test_allows_https_and_loopback_http(
+        self, monkeypatch, helper, provider_key, scheme, url,
+    ):
+        from unittest.mock import patch
+        from urllib.parse import urlparse
+        from specify_cli.authentication import http
+
+        entry = AuthConfigEntry(
+            hosts=(urlparse(url).hostname,), provider=provider_key, auth=scheme,
+            token="test-token", username="test-user",
+        )
+        monkeypatch.setattr(http, "_config_override", [entry])
+        provider = get_provider(provider_key)
+        assert provider is not None
+        token = "test-user:test-token" if scheme == "basic" else "test-token"
+        with patch.object(
+            provider, "resolve_token", return_value=token,
+        ) as resolve, patch.object(http.urllib.request, "build_opener") as build_opener:
+            result = getattr(http, helper)(url, extra_headers={"Accept": "application/zip"})
+            if helper == "build_request":
+                request = result
+                build_opener.assert_not_called()
+            else:
+                opener = build_opener.return_value
+                assert result is opener.open.return_value
+                opener.open.assert_called_once()
+                request = opener.open.call_args.args[0]
+            resolve.assert_called_once_with(entry)
+            assert request.full_url == url
+            assert request.get_header("Accept") == "application/zip"
+            assert request.get_header("Authorization") == provider.auth_headers(
+                token, scheme,
+            )["Authorization"]
+
+
 class TestAuthenticatedHttpNegative:
     def _set_config(self, monkeypatch, entries):
         from specify_cli.authentication import http as _mod
         monkeypatch.setattr(_mod, "_config_override", entries)
+
+    @pytest.mark.parametrize("authenticated", [False, True])
+    def test_http_error_closes_response_body(self, monkeypatch, authenticated):
+        import urllib.error
+        from unittest.mock import patch
+        from specify_cli.authentication.http import open_url
+
+        entries = [_github_entry(token="tok")] if authenticated else []
+        self._set_config(monkeypatch, entries)
+        body = io.BytesIO(b"server error")
+        error = urllib.error.HTTPError("url", 500, "ISE", {}, body)
+        with patch("specify_cli.authentication.http.urllib.request.build_opener") as build_opener:
+            build_opener.return_value.open.side_effect = error
+            with pytest.raises(urllib.error.HTTPError) as raised:
+                open_url("https://github.com/org/repo")
+
+        assert raised.value is error
+        assert body.closed
+        build_opener.return_value.open.assert_called_once()
 
     def test_500_raises_immediately(self, monkeypatch):
         import urllib.error
@@ -1578,7 +1697,6 @@ class TestGitHubCliAuthenticatedHttp:
         run.assert_called_once_with(
             [executable, "auth", "token", "--hostname", "github.com"],
             capture_output=True,
-            text=True,
             timeout=10,
             check=False,
             shell=False,
@@ -2143,6 +2261,77 @@ class TestRedirectStripping:
                 target,
             )
 
+    @pytest.mark.parametrize("code", [301, 302, 303, 307, 308])
+    @pytest.mark.parametrize("header", ["Location", "URI"])
+    @pytest.mark.parametrize("target", [
+        "https://[::1",
+        "https://example.com:invalid/catalog.json",
+        "https:///catalog.json",
+        "https://:443/catalog.json",
+        "http:///catalog.json",
+        "file:///catalog.json",
+    ])
+    def test_redirect_response_rejects_malformed_location(self, code, header, target):
+        from email.message import Message
+        from unittest.mock import MagicMock
+        from urllib.request import Request
+
+        from specify_cli.authentication.http import RedirectPolicyError, _StripAuthOnRedirect
+
+        handler = _StripAuthOnRedirect(("example.com",))
+        parent = MagicMock()
+        handler.add_parent(parent)
+        request = Request("https://example.com/catalog.json")
+        request.timeout = 10
+        headers = Message()
+        headers[header] = target
+
+        with pytest.raises(RedirectPolicyError):
+            getattr(handler, f"http_error_{code}")(
+                request, io.BytesIO(b""), code, "Found", headers,
+            )
+        parent.open.assert_not_called()
+
+    @pytest.mark.parametrize("code", [301, 302, 303, 307, 308])
+    @pytest.mark.parametrize("header", ["Location", "URI"])
+    @pytest.mark.parametrize("target,expected_url,expected_auth", [
+        ("/next.json", "https://example.com/next.json", "test-token"),
+        ("next.json", "https://example.com/next.json", "test-token"),
+        ("?page=2", "https://example.com/catalog.json?page=2", "test-token"),
+        ("//cdn.example.org/next.json", "https://cdn.example.org/next.json", None),
+        ("https://example.com/next file.json", "https://example.com/next%20file.json", "test-token"),
+    ])
+    def test_redirect_response_preserves_supported_locations(
+        self, code, header, target, expected_url, expected_auth,
+    ):
+        from email.message import Message
+        from unittest.mock import MagicMock
+        from urllib.request import Request
+
+        from specify_cli.authentication.http import _StripAuthOnRedirect
+
+        handler = _StripAuthOnRedirect(("example.com",))
+        parent = MagicMock()
+        handler.add_parent(parent)
+        request = Request(
+            "https://example.com/catalog.json",
+            headers={"Authorization": "test-token"},
+        )
+        request.timeout = 10
+        headers = Message()
+        headers[header] = target
+        response = io.BytesIO(b"redirect body")
+
+        result = getattr(handler, f"http_error_{code}")(
+            request, response, code, "Found", headers,
+        )
+        assert result is parent.open.return_value
+        parent.open.assert_called_once()
+        redirected = parent.open.call_args.args[0]
+        assert redirected.full_url == expected_url
+        assert redirected.get_header("Authorization") == expected_auth
+        assert response.closed
+
     def test_strict_redirect_error_describes_target_and_allowed_localhost(self):
         from specify_cli.authentication.http import _StripAuthOnRedirect
         from urllib.request import Request
@@ -2264,3 +2453,254 @@ class TestGithubProviderHosts:
             AuthConfigEntry(hosts=("github.com",), provider="github", auth="bearer", token="t"),
         ])
         assert github_provider_hosts() == ("ghes.example", "github.com")
+
+
+class TestCliCredentialSubprocessEncoding:
+    @staticmethod
+    def _install_cp1252_cli_shim(monkeypatch, module, which_path: str, script):
+        import subprocess
+        import sys
+        import threading
+
+        real_run = subprocess.run
+        calls = 0
+        thread_errors: list[BaseException] = []
+
+        def record_thread_error(args):
+            if args.exc_value is not None:
+                thread_errors.append(args.exc_value)
+
+        def run_with_cp1252_default(argv, **kwargs):
+            nonlocal calls
+            calls += 1
+            if (
+                kwargs.get("text") or kwargs.get("universal_newlines")
+            ) and kwargs.get("encoding") is None:
+                kwargs = {**kwargs, "encoding": "cp1252"}
+            return real_run([sys.executable, str(script), *argv[1:]], **kwargs)
+
+        monkeypatch.setattr(threading, "excepthook", record_thread_error)
+        monkeypatch.setattr(module.shutil, "which", lambda _name: which_path)
+        monkeypatch.setattr(module.subprocess, "run", run_with_cp1252_default)
+        return lambda: (calls, thread_errors)
+
+    def test_azure_cli_real_subprocess_decodes_utf8_json_under_cp1252(
+        self, tmp_path, monkeypatch
+    ):
+        from specify_cli.authentication import azure_devops as ado_mod
+
+        fake_az = tmp_path / "fake_az.py"
+        fake_az.write_text(
+            "import json, sys\n"
+            "payload = {\n"
+            "    'accessToken': '  ado-utf8-token  ',\n"
+            "    'subscription': '\\u540e\\u53f0\\u4fe1\\u606f \\u2014 \\u201cEast\\u201d',\n"
+            "}\n"
+            "sys.stdout.buffer.write(\n"
+            "    json.dumps(payload, ensure_ascii=False).encode('utf-8') + b'\\r\\n'\n"
+            ")\n",
+            encoding="utf-8",
+        )
+        executable = os.path.join(os.path.abspath(os.sep), "opt", "az", "az")
+        inspect_state = self._install_cp1252_cli_shim(
+            monkeypatch, ado_mod, executable, fake_az
+        )
+        entry = AuthConfigEntry(
+            hosts=("dev.azure.com",), provider="azure-devops", auth="azure-cli"
+        )
+
+        token = AzureDevOpsAuth().resolve_token(entry)
+        calls, thread_errors = inspect_state()
+
+        assert token == "ado-utf8-token"
+        assert calls == 1
+        assert thread_errors == []
+
+    @pytest.mark.parametrize(
+        "raw_stdout",
+        [b"\x81\xff", b'{"accessToken": "secret\xff"}'],
+        ids=["cp1252-undefined-byte", "invalid-utf8-json-string"],
+    )
+    def test_azure_cli_real_subprocess_invalid_utf8_returns_none(
+        self, tmp_path, monkeypatch, raw_stdout
+    ):
+        from specify_cli.authentication import azure_devops as ado_mod
+
+        fake_az = tmp_path / "bad_az.py"
+        fake_az.write_text(
+            f"import sys\nsys.stdout.buffer.write({raw_stdout!r})\n",
+            encoding="utf-8",
+        )
+        executable = os.path.join(os.path.abspath(os.sep), "opt", "az", "az")
+        inspect_state = self._install_cp1252_cli_shim(
+            monkeypatch, ado_mod, executable, fake_az
+        )
+        entry = AuthConfigEntry(
+            hosts=("dev.azure.com",), provider="azure-devops", auth="azure-cli"
+        )
+
+        assert AzureDevOpsAuth().resolve_token(entry) is None
+        _, thread_errors = inspect_state()
+        assert thread_errors == []
+
+    def test_build_request_falls_through_when_azure_cli_returns_invalid_utf8(
+        self, tmp_path, monkeypatch
+    ):
+        from specify_cli.authentication import azure_devops as ado_mod
+        from specify_cli.authentication import http as http_mod
+
+        fake_az = tmp_path / "bad_az.py"
+        fake_az.write_text(
+            "import sys\nsys.stdout.buffer.write(b'\\x81\\xff')\n",
+            encoding="utf-8",
+        )
+        executable = os.path.join(os.path.abspath(os.sep), "opt", "az", "az")
+        inspect_state = self._install_cp1252_cli_shim(
+            monkeypatch, ado_mod, executable, fake_az
+        )
+        monkeypatch.setattr(
+            http_mod,
+            "_config_override",
+            [
+                AuthConfigEntry(
+                    hosts=("dev.azure.com",),
+                    provider="azure-devops",
+                    auth="azure-cli",
+                ),
+                AuthConfigEntry(
+                    hosts=("dev.azure.com",),
+                    provider="azure-devops",
+                    auth="bearer",
+                    token="fallback-token",
+                ),
+            ],
+        )
+
+        req = http_mod.build_request("https://dev.azure.com/org/proj")
+        _, thread_errors = inspect_state()
+
+        assert req.get_header("Authorization") == "Bearer fallback-token"
+        assert thread_errors == []
+
+    def test_github_cli_real_subprocess_decodes_trims_and_caches_token_bytes(
+        self, tmp_path, monkeypatch
+    ):
+        from specify_cli.authentication import github as gh_mod
+
+        fake_gh = tmp_path / "good_gh.py"
+        fake_gh.write_text(
+            "import sys\n"
+            "sys.stdout.buffer.write(b'  gho_test_token_123  \\r\\n')\n",
+            encoding="utf-8",
+        )
+        executable = os.path.join(os.path.abspath(os.sep), "opt", "gh", "gh")
+        inspect_state = self._install_cp1252_cli_shim(
+            monkeypatch, gh_mod, executable, fake_gh
+        )
+        provider = GitHubAuth()
+        entry = _github_cli_entry()
+
+        assert provider.resolve_token(entry) == "gho_test_token_123"
+        assert provider.resolve_token(entry) == "gho_test_token_123"
+
+        calls, thread_errors = inspect_state()
+        assert calls == 1
+        assert thread_errors == []
+
+    @pytest.mark.parametrize(
+        "raw_stdout",
+        [b"secret\x81\xff\n", b"secret\xff\n"],
+        ids=["cp1252-undefined-byte", "latin-high-byte"],
+    )
+    def test_github_cli_real_subprocess_invalid_utf8_caches_sanitized_failure(
+        self, tmp_path, monkeypatch, raw_stdout
+    ):
+        from specify_cli.authentication import github as gh_mod
+
+        fake_gh = tmp_path / "bad_gh.py"
+        fake_gh.write_text(
+            f"import sys\nsys.stdout.buffer.write({raw_stdout!r})\n",
+            encoding="utf-8",
+        )
+        executable = os.path.join(os.path.abspath(os.sep), "opt", "gh", "gh")
+        inspect_state = self._install_cp1252_cli_shim(
+            monkeypatch, gh_mod, executable, fake_gh
+        )
+        provider = GitHubAuth()
+
+        for _ in range(2):
+            with pytest.raises(
+                GitHubCliAuthError, match="could not provide a token"
+            ) as exc_info:
+                provider.resolve_token(_github_cli_entry())
+            assert "secret" not in str(exc_info.value)
+
+        calls, thread_errors = inspect_state()
+        assert calls == 1
+        assert thread_errors == []
+
+    def test_github_cli_real_subprocess_utf8_non_ascii_token_raises_malformed_token(
+        self, tmp_path, monkeypatch
+    ):
+        from specify_cli.authentication import github as gh_mod
+
+        fake_gh = tmp_path / "malformed_gh.py"
+        fake_gh.write_text(
+            "import sys\n"
+            "sys.stdout.buffer.write(' synthetic_credential\\u201dextra\\n'.encode('utf-8'))\n",
+            encoding="utf-8",
+        )
+        executable = os.path.join(os.path.abspath(os.sep), "opt", "gh", "gh")
+        inspect_state = self._install_cp1252_cli_shim(
+            monkeypatch, gh_mod, executable, fake_gh
+        )
+        provider = GitHubAuth()
+
+        for _ in range(2):
+            with pytest.raises(
+                GitHubCliAuthError, match="malformed token"
+            ) as exc_info:
+                provider.resolve_token(_github_cli_entry())
+            assert "synthetic_credential" not in str(exc_info.value)
+            assert "extra" not in str(exc_info.value)
+
+        calls, thread_errors = inspect_state()
+        assert calls == 1
+        assert thread_errors == []
+
+    def test_cli_providers_nonzero_exit_with_utf8_stderr_do_not_fail_decoding(
+        self, tmp_path, monkeypatch
+    ):
+        from specify_cli.authentication import azure_devops as ado_mod
+        from specify_cli.authentication import github as gh_mod
+
+        failing_cli = tmp_path / "failing_cli.py"
+        failing_cli.write_text(
+            "import sys\n"
+            "sys.stderr.buffer.write('error: \\u201cgithub.com\\u201d (\\u540e\\u53f0)\\n'.encode('utf-8'))\n"
+            "raise SystemExit(1)\n",
+            encoding="utf-8",
+        )
+        gh_exe = os.path.join(os.path.abspath(os.sep), "opt", "gh", "gh")
+        inspect_gh = self._install_cp1252_cli_shim(
+            monkeypatch, gh_mod, gh_exe, failing_cli
+        )
+
+        with pytest.raises(
+            GitHubCliAuthError, match="gh auth login --hostname github.com"
+        ):
+            GitHubAuth().resolve_token(_github_cli_entry())
+        _, gh_thread_errors = inspect_gh()
+        assert gh_thread_errors == []
+
+        az_exe = os.path.join(os.path.abspath(os.sep), "opt", "az", "az")
+        inspect_az = self._install_cp1252_cli_shim(
+            monkeypatch, ado_mod, az_exe, failing_cli
+        )
+        ado_entry = AuthConfigEntry(
+            hosts=("dev.azure.com",), provider="azure-devops", auth="azure-cli"
+        )
+
+        assert AzureDevOpsAuth().resolve_token(ado_entry) is None
+        _, az_thread_errors = inspect_az()
+        assert az_thread_errors == []

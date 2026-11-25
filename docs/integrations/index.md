@@ -21,6 +21,19 @@ The documentation commonly uses `/speckit.*` notation, but your agent may use
 hyphenated skills, `$` skills, or another native form. See your integration's
 page and the [command invocation comparison](cli.md#command-invocation).
 
+## Generated Skill Versions
+
+Generated `SKILL.md` frontmatter includes `metadata.version` when the supplying
+component's version is known. Core skills record the generating Specify CLI
+version; extension and preset skills record their respective component versions.
+The value is a string, and the key is omitted when the version is unknown.
+
+Existing metadata, including `metadata.author` and `metadata.source`, keeps its
+meaning. Skills regenerated through an existing operation, including restoration
+after a preset is removed, record the resulting component's version. Skills
+already on disk are not rewritten automatically, and this metadata does not
+perform stale-skill detection or upgrades.
+
 ## Adding Another Agent
 
 In an initialized project, use
@@ -63,8 +76,8 @@ specify integration switch none
 
 > [!IMPORTANT]
 > Do not manually edit Spec Kit-generated agent commands or skills. Maintain
-> customizations in reviewed [presets](../reference/presets.md) or
-> [project-local overrides](../guides/customization.md#project-local-overrides-and-resolution).
+> customizations in reviewed [presets](../presets/overview.md) or
+> [project-local overrides](../how-to/customization.md#project-local-overrides-and-resolution).
 > Before committing, use
 > [`specify integration status`](cli.md#report-integration-status) to verify
 > that `none` is the only installed and default integration. Review the Git diff
@@ -141,6 +154,11 @@ is not a security endorsement; the default community catalog is discovery-only.
 See [catalog-installed external adapters](cli.md#catalog-installed-external-adapters)
 for trust and installation requirements.
 
+The [API reference](api.md) documents the supported Python adapter contract.
 The [catalog reference](catalog.md) describes descriptor and catalog metadata.
 See [contributing integrations](contributing.md) to develop a built-in
 integration or publish an external adapter.
+
+## See also
+
+- [Community integrations](../community/integrations.md)

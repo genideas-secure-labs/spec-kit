@@ -3,11 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 
 import yaml
+import pytest
 
 from specify_cli.presets import (
     PresetManager,
 )
 from tests.conftest import strip_ansi
+from tests.parity_helpers import install_section_stack
 
 
 class TestPresetResolve:
@@ -79,6 +81,34 @@ class TestPresetResolve:
 
         with patch.object(Path, "cwd", return_value=project_dir):
             return CliRunner().invoke(app, args)
+
+    @pytest.mark.parametrize(
+        "content,code",
+        [("# No target\n", "SECTION_NOT_FOUND"), ("## Target\n## Target\n", "SECTION_AMBIGUOUS")],
+    )
+    def test_section_errors_fail_inspection(self, project_dir, content, code):
+        name, _ = install_section_stack(project_dir, content, "new\n")
+        result = self._invoke(project_dir, ["preset", "resolve", name])
+        assert result.exit_code == 1, result.output
+        assert code in result.output
+        assert "Final output is composed" not in result.output
+
+    def test_section_missing_base_fails_inspection(self, project_dir):
+        name, _ = install_section_stack(project_dir, "## Target\nold\n", "new\n")
+        (project_dir / ".specify/templates" / f"{name}.md").unlink()
+        result = self._invoke(project_dir, ["preset", "resolve", name])
+        assert result.exit_code == 1
+        assert "no replace base" in result.output
+
+    def test_hidden_invalid_section_does_not_block_inspection(self, project_dir):
+        name, _ = install_section_stack(project_dir, "## Target\nold\n", "invalid\n", selector=None)
+        override = project_dir / ".specify/templates/overrides" / f"{name}.md"
+        override.parent.mkdir(parents=True, exist_ok=True)
+        override.write_bytes(b"# Winning override\n")
+        result = self._invoke(project_dir, ["preset", "resolve", name])
+        assert result.exit_code == 0, result.output
+        assert "project override" in result.output
+        assert "Error:" not in result.output
 
     def test_resolve_rejects_invalid_template_name(self, project_dir):
         """``preset resolve`` rejects names before joining them into paths."""
@@ -214,3 +244,128 @@ class TestPresetResolve:
         assert "Composition chain" in output, output
         assert "[base]" in output, output
         assert "[append]" in output, output
+
+    def test_resolve_falls_back_to_script_artifacts(self, temp_dir, project_dir):
+        """A preset may register an executable artifact as a script.
+
+        ``preset resolve`` used to look at commands and templates only, so a
+        ``type: script`` entry (e.g. a ``.mjs`` adapter) was reported as not
+        found even though the resolver stack holds it.
+        """
+        src = temp_dir / "src-script-pack"
+        (src / "adapters").mkdir(parents=True)
+        (src / "adapters" / "page-adapter.mjs").write_text("export default {};\n")
+        (src / "preset.yml").write_text(
+            yaml.dump(
+                {
+                    "schema_version": "1.0",
+                    "preset": {
+                        "id": "script-pack",
+                        "name": "script-pack",
+                        "version": "1.0.0",
+                        "description": "script pack",
+                    },
+                    "requires": {"speckit_version": ">=0.0.1"},
+                    "provides": {
+                        "templates": [
+                            {
+                                "type": "script",
+                                "name": "page-adapter",
+                                "file": "adapters/page-adapter.mjs",
+                                "strategy": "replace",
+                            }
+                        ]
+                    },
+                }
+            )
+        )
+        PresetManager(project_dir).install_from_directory(src, "9.9.9", 10)
+
+        result = self._invoke(project_dir, ["preset", "resolve", "page-adapter"])
+
+        assert result.exit_code == 0, (result.output, result.exception)
+        output = " ".join(strip_ansi(result.output).split())
+        # Rich may line-wrap a long path, so remove all whitespace for path assertions.
+        path_output = "".join(output.split())
+        assert "page-adapter.mjs" in path_output, output
+        assert "not found" not in output
+
+    def test_resolve_prefers_template_over_higher_priority_script(
+        self, temp_dir, project_dir
+    ):
+        """A template wins over a same-named script from a higher-priority preset.
+
+        The script fallback must not change the backward-compatible precedence:
+        commands and templates are still asked for first, so an existing
+        template keeps resolving even when a script with the same name sits in
+        a higher-priority preset.
+        """
+        script_src = temp_dir / "src-script-pack"
+        (script_src / "adapters").mkdir(parents=True)
+        (script_src / "adapters" / "shared-asset.mjs").write_text("export default {};\n")
+        (script_src / "preset.yml").write_text(
+            yaml.dump(
+                {
+                    "schema_version": "1.0",
+                    "preset": {
+                        "id": "script-pack",
+                        "name": "script-pack",
+                        "version": "1.0.0",
+                        "description": "script pack",
+                    },
+                    "requires": {"speckit_version": ">=0.0.1"},
+                    "provides": {
+                        "templates": [
+                            {
+                                "type": "script",
+                                "name": "shared-asset",
+                                "file": "adapters/shared-asset.mjs",
+                                "strategy": "replace",
+                            }
+                        ]
+                    },
+                }
+            )
+        )
+
+        template_src = temp_dir / "src-template-pack"
+        (template_src / "templates").mkdir(parents=True)
+        (template_src / "templates" / "shared-asset.md").write_text("# tmpl\n")
+        (template_src / "preset.yml").write_text(
+            yaml.dump(
+                {
+                    "schema_version": "1.0",
+                    "preset": {
+                        "id": "template-pack",
+                        "name": "template-pack",
+                        "version": "1.0.0",
+                        "description": "template pack",
+                    },
+                    "requires": {"speckit_version": ">=0.0.1"},
+                    "provides": {
+                        "templates": [
+                            {
+                                "type": "template",
+                                "name": "shared-asset",
+                                "file": "templates/shared-asset.md",
+                                "strategy": "replace",
+                            }
+                        ]
+                    },
+                }
+            )
+        )
+
+        # Lower numbers sort first in the registry, so the script preset (5)
+        # outranks the template preset (20); the template must still win.
+        PresetManager(project_dir).install_from_directory(script_src, "9.9.9", 5)
+        PresetManager(project_dir).install_from_directory(template_src, "9.9.9", 20)
+
+        result = self._invoke(project_dir, ["preset", "resolve", "shared-asset"])
+
+        assert result.exit_code == 0, (result.output, result.exception)
+        output = " ".join(strip_ansi(result.output).split())
+        # Rich may line-wrap a long path, so remove all whitespace for path assertions.
+        path_output = "".join(output.split())
+        assert "shared-asset.md" in path_output, output
+        assert "shared-asset.mjs" not in path_output, output

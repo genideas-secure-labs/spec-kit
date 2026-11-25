@@ -25,6 +25,149 @@ from tests.specify_cli.self_upgrade_helpers import (
 )
 
 
+class TestRelocatedToolDetection:
+    @pytest.mark.parametrize("value", ["./tools", "../tools", "~/tools"])
+    @pytest.mark.parametrize("environment,expected", [
+        ("specify-cli", _InstallMethod.UV_TOOL),
+        ("specify-cli2", _InstallMethod.UNSUPPORTED),
+    ])
+    def test_relative_uv_tool_dir(self, monkeypatch, tmp_path, value, environment, expected):
+        working_dir = tmp_path / "working"
+        working_dir.mkdir()
+        monkeypatch.chdir(working_dir)
+        monkeypatch.setenv("UV_TOOL_DIR", value)
+        entrypoint = (working_dir / value / environment / "bin" / "specify").resolve()
+        entrypoint.parent.mkdir(parents=True)
+        entrypoint.write_text("#!/usr/bin/env python\n")
+        with patch("specify_cli._version._editable_marker_seen", return_value=False), patch(
+            "specify_cli._version.subprocess.run"
+        ) as registry_lookup:
+            assert _detect_install_method(str(entrypoint)) == expected
+        registry_lookup.assert_not_called()
+
+    @pytest.mark.parametrize("value", ["./data", "~/custom-data"])
+    @pytest.mark.parametrize("suffix", ["uv/tools/specify-cli/", "pipx/venvs/specify-cli/"])
+    def test_relative_xdg_data_home_is_not_accepted(self, monkeypatch, tmp_path, suffix, value):
+        from specify_cli._version import _expand_prefix, _path_is_within_prefix
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+        monkeypatch.setenv("XDG_DATA_HOME", value)
+        prefix = _expand_prefix("${XDG_DATA_HOME}/" + suffix)
+        entrypoint = Path(os.path.expanduser(value)).resolve() / suffix / "bin/specify"
+        assert not _path_is_within_prefix(entrypoint, prefix)
+
+    def test_uv_tool_dir_tilde_does_not_select_home_directory(self, monkeypatch, tmp_path):
+        home = tmp_path / "home"
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
+        monkeypatch.setenv("UV_TOOL_DIR", "~/tools")
+        entrypoint = home / "tools" / "specify-cli" / "bin" / "specify"
+        entrypoint.parent.mkdir(parents=True)
+        entrypoint.write_text("#!/usr/bin/env python\n")
+        with patch("specify_cli._version._editable_marker_seen", return_value=False), patch(
+            "specify_cli._version.subprocess.run"
+        ) as registry_lookup:
+            assert _detect_install_method(str(entrypoint)) == _InstallMethod.UNSUPPORTED
+        registry_lookup.assert_not_called()
+
+    @pytest.mark.parametrize("environment,expected", [
+        ("specify-cli", _InstallMethod.PIPX),
+        ("specify-cli2", _InstallMethod.UNSUPPORTED),
+    ])
+    def test_pipx_home_with_tilde(self, monkeypatch, tmp_path, environment, expected):
+        home = tmp_path / "home"
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
+        monkeypatch.setenv("PIPX_HOME", "~/pipx-home")
+        entrypoint = home / "pipx-home" / "venvs" / environment / "bin" / "specify"
+        entrypoint.parent.mkdir(parents=True)
+        entrypoint.write_text("#!/usr/bin/env python\n")
+        with patch("specify_cli._version._editable_marker_seen", return_value=False), patch(
+            "specify_cli._version.subprocess.run"
+        ) as registry_lookup:
+            assert _detect_install_method(str(entrypoint)) == expected
+        registry_lookup.assert_not_called()
+
+    @pytest.mark.parametrize("value", ["./pipx-home", "../pipx-home"])
+    @pytest.mark.parametrize("environment,expected", [
+        ("specify-cli", _InstallMethod.PIPX),
+        ("specify-cli2", _InstallMethod.UNSUPPORTED),
+    ])
+    def test_relative_pipx_home(self, monkeypatch, tmp_path, value, environment, expected):
+        working_dir = tmp_path / "working"
+        working_dir.mkdir()
+        monkeypatch.chdir(working_dir)
+        monkeypatch.setenv("PIPX_HOME", value)
+        entrypoint = (working_dir / value / "venvs" / environment / "bin" / "specify").resolve()
+        entrypoint.parent.mkdir(parents=True)
+        entrypoint.write_text("#!/usr/bin/env python\n")
+        with patch("specify_cli._version._editable_marker_seen", return_value=False), patch(
+            "specify_cli._version.subprocess.run"
+        ) as registry_lookup:
+            assert _detect_install_method(str(entrypoint)) == expected
+        registry_lookup.assert_not_called()
+
+    @pytest.mark.parametrize("env_name,suffix,method", [
+        ("UV_TOOL_DIR", "specify-cli/bin/specify", _InstallMethod.UV_TOOL),
+        ("XDG_DATA_HOME", "uv/tools/specify-cli/bin/specify", _InstallMethod.UV_TOOL),
+        ("APPDATA", "uv/data/tools/specify-cli/bin/specify", _InstallMethod.UV_TOOL),
+        ("APPDATA", "uv/tools/specify-cli/bin/specify", _InstallMethod.UV_TOOL),
+        ("HOME", "Library/Application Support/uv/tools/specify-cli/bin/specify", _InstallMethod.UV_TOOL),
+        ("PIPX_HOME", "venvs/specify-cli/bin/specify", _InstallMethod.PIPX),
+        ("XDG_DATA_HOME", "pipx/venvs/specify-cli/bin/specify", _InstallMethod.PIPX),
+        ("LOCALAPPDATA", "pipx/pipx/venvs/specify-cli/bin/specify", _InstallMethod.PIPX),
+        ("HOME", ".local/share/pipx/venvs/specify-cli/bin/specify", _InstallMethod.PIPX),
+        ("HOME", "Library/Application Support/pipx/venvs/specify-cli/bin/specify", _InstallMethod.PIPX),
+        ("HOME", "pipx/venvs/specify-cli/bin/specify", _InstallMethod.PIPX),
+    ])
+    def test_tool_directory_matches(self, monkeypatch, tmp_path, env_name, suffix, method):
+        root = tmp_path / "tool data"
+        monkeypatch.setenv(env_name, str(root))
+        if env_name == "HOME":
+            monkeypatch.setenv("USERPROFILE", str(root))
+        entrypoint = root / suffix
+        entrypoint.parent.mkdir(parents=True)
+        entrypoint.write_text("#!/usr/bin/env python\n")
+        with patch("specify_cli._version._editable_marker_seen", return_value=False), patch(
+            "specify_cli._version.subprocess.run"
+        ) as registry_lookup:
+            actual, signals = _detect_install_method(str(entrypoint), include_signals=True)
+        assert actual == method
+        assert signals.matched_tier == 1
+        registry_lookup.assert_not_called()
+
+    @pytest.mark.parametrize("env_name,suffix", [
+        ("UV_TOOL_DIR", "specify-cli2/bin/specify"),
+        ("APPDATA", "uv/tools/specify-cli2/bin/specify"),
+        ("HOME", "Library/Application Support/uv/tools/specify-cli2/bin/specify"),
+        ("XDG_DATA_HOME", "uv/tools/specify-cli2/bin/specify"),
+        ("PIPX_HOME", "venvs/specify-cli2/bin/specify"),
+    ])
+    def test_sibling_environment_is_not_accepted(self, monkeypatch, tmp_path, env_name, suffix):
+        monkeypatch.setenv(env_name, str(tmp_path))
+        if env_name == "HOME":
+            monkeypatch.setenv("USERPROFILE", str(tmp_path))
+        entrypoint = tmp_path / suffix
+        entrypoint.parent.mkdir(parents=True)
+        entrypoint.write_text("#!/usr/bin/env python\n")
+        with patch("specify_cli._version._editable_marker_seen", return_value=False):
+            assert _detect_install_method(str(entrypoint)) == _InstallMethod.UNSUPPORTED
+
+    @pytest.mark.parametrize("value", [None, ""])
+    @pytest.mark.parametrize("variable", ["UV_TOOL_DIR", "PIPX_HOME", "XDG_DATA_HOME"])
+    def test_unconfigured_prefix_is_ignored(self, monkeypatch, variable, value):
+        from specify_cli._version import _expand_prefix
+
+        if value is None:
+            monkeypatch.delenv(variable, raising=False)
+        else:
+            monkeypatch.setenv(variable, value)
+        assert _expand_prefix("${" + variable + "}/specify-cli/") is None
+
+
 class TestDetectionUvTool:
     """Tier-1 path-prefix detection for uv-tool installs."""
 
@@ -1204,3 +1347,142 @@ class TestDryRunPipx:
         assert result.exit_code == 0
         assert "Detected install method: pipx" in strip_ansi(result.output)
         assert mock_run.call_count == 0
+
+
+class TestTier3SubprocessEncoding:
+    @staticmethod
+    def _install_cp1252_runner(monkeypatch, script_by_tool: dict[str, Path]) -> list[BaseException]:
+        import threading
+
+        real_run = subprocess.run
+        thread_errors: list[BaseException] = []
+        old_hook = threading.excepthook
+
+        def capture_hook(args):
+            thread_errors.append(args.exc_value)
+
+        monkeypatch.setattr(threading, "excepthook", capture_hook)
+
+        def run_with_cp1252(argv, *args, **kwargs):
+            tool = Path(argv[0]).stem.lower()
+            helper = script_by_tool[tool]
+            if (
+                kwargs.get("text") or kwargs.get("universal_newlines")
+            ) and kwargs.get("encoding") is None:
+                kwargs = {**kwargs, "encoding": "cp1252"}
+            return real_run([sys.executable, str(helper), *argv[1:]], *args, **kwargs)
+
+        assert old_hook is not None
+        monkeypatch.setattr("specify_cli._version.subprocess.run", run_with_cp1252)
+        return thread_errors
+
+    def test_tier3_uv_tool_list_decodes_utf8_paths_under_cp1252(
+        self, monkeypatch, tmp_path
+    ):
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        monkeypatch.setattr("sys.argv", [str(tmp_path / "missing" / "specify")])
+
+        tools_dir = tmp_path / "tools"
+        tools_dir.mkdir()
+        fake_uv_bin = tools_dir / ("uv.exe" if os.name == "nt" else "uv")
+        fake_uv_bin.write_bytes(b"stub")
+        fake_uv_bin.chmod(0o755)
+
+        fake_uv_py = tmp_path / "fake_uv.py"
+        fake_uv_py.write_text(
+            "import sys\n"
+            "out = 'other-tool v1.0.0 (C:\\\\Users\\\\\\u540e\\u53f0\\\\tool)\\nspecify-cli v0.7.6\\n'\n"
+            "sys.stdout.buffer.write(out.encode('utf-8'))\n",
+            encoding="utf-8",
+        )
+        thread_errors = self._install_cp1252_runner(monkeypatch, {"uv": fake_uv_py})
+
+        with patch(
+            "specify_cli._version.shutil.which",
+            side_effect=lambda name: str(fake_uv_bin) if name == "uv" else None,
+        ), patch("specify_cli._version._editable_marker_seen", return_value=False):
+            method, signals = _detect_install_method(include_signals=True)
+
+        assert method == _InstallMethod.UV_TOOL
+        assert signals.matched_tier == 3
+        assert thread_errors == []
+
+    def test_tier3_pipx_list_json_decodes_utf8_paths_under_cp1252(
+        self, monkeypatch, tmp_path
+    ):
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        monkeypatch.setattr("sys.argv", [str(tmp_path / "missing" / "specify")])
+
+        tools_dir = tmp_path / "tools"
+        tools_dir.mkdir()
+        fake_pipx_bin = tools_dir / ("pipx.exe" if os.name == "nt" else "pipx")
+        fake_pipx_bin.write_bytes(b"stub")
+        fake_pipx_bin.chmod(0o755)
+
+        fake_pipx_py = tmp_path / "fake_pipx.py"
+        fake_pipx_py.write_text(
+            "import json, sys\n"
+            "payload = {\n"
+            "    'venvs': {\n"
+            "        'specify-cli': {\n"
+            "            'metadata': {\n"
+            "                'app_paths': ['C:\\\\Users\\\\\\u540e\\u53f0\\\\.local\\\\bin\\\\specify.exe'],\n"
+            "                'note': '\\u201cquoted\\u201d',\n"
+            "            }\n"
+            "        }\n"
+            "    }\n"
+            "}\n"
+            "sys.stdout.buffer.write(json.dumps(payload, ensure_ascii=False).encode('utf-8'))\n",
+            encoding="utf-8",
+        )
+        thread_errors = self._install_cp1252_runner(monkeypatch, {"pipx": fake_pipx_py})
+
+        with patch(
+            "specify_cli._version.shutil.which",
+            side_effect=lambda name: str(fake_pipx_bin) if name == "pipx" else None,
+        ), patch("specify_cli._version._editable_marker_seen", return_value=False):
+            method, signals = _detect_install_method(include_signals=True)
+
+        assert method == _InstallMethod.PIPX
+        assert signals.matched_tier == 3
+        assert thread_errors == []
+
+    def test_tier3_malformed_non_utf8_registry_output_falls_back_cleanly(
+        self, monkeypatch, tmp_path
+    ):
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        monkeypatch.setattr("sys.argv", [str(tmp_path / "missing" / "specify")])
+
+        tools_dir = tmp_path / "tools"
+        tools_dir.mkdir()
+        bins: dict[str, Path] = {}
+        scripts: dict[str, Path] = {}
+        for name in ("uv", "pipx"):
+            b = tools_dir / (f"{name}.exe" if os.name == "nt" else name)
+            b.write_bytes(b"stub")
+            b.chmod(0o755)
+            bins[name] = b
+            s = tmp_path / f"bad_{name}.py"
+            s.write_text(
+                "import sys\nsys.stdout.buffer.write(b'\\x81\\xff\\x90')\n",
+                encoding="utf-8",
+            )
+            scripts[name] = s
+
+        thread_errors = self._install_cp1252_runner(monkeypatch, scripts)
+
+        with patch(
+            "specify_cli._version.shutil.which",
+            side_effect=lambda name: str(bins[name]) if name in bins else None,
+        ), patch("specify_cli._version._editable_marker_seen", return_value=False):
+            method, signals = _detect_install_method(include_signals=True)
+
+        assert thread_errors == []
+        assert method == _InstallMethod.UNSUPPORTED
+        assert signals.matched_tier is None

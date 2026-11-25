@@ -16,7 +16,7 @@ from ..integration_state import (
 )
 from ._commands import integration_app
 from ._lifecycle import external_lifecycle, lifecycle_owns_rollback, lifecycle_success
-from ._helpers import _MANIFEST_READ_ERRORS, _SharedTemplateRefreshError, _clear_init_options_for_integration, _cli_error_detail, _cli_phase_label, _get_speckit_version, _read_integration_json, _register_extensions_for_agent, _register_presets_for_agent, _remove_integration_json, _resync_manifest_after_registration, _resolve_integration_options, _resolve_script_type, _set_default_integration, _set_default_integration_or_exit, _snapshot_manifest_before_registration, _unregister_extensions_for_agent, _unregister_presets_for_agent, _write_integration_json
+from ._helpers import _MANIFEST_READ_ERRORS, _SharedTemplateRefreshError, _clear_init_options_for_integration, _cli_error_detail, _cli_phase_label, _get_speckit_version, _preflight_setup_or_exit, _read_integration_json, _register_extensions_for_agent, _register_presets_for_agent, _remove_integration_json, _resync_manifest_after_registration, _resolve_integration_options, _resolve_script_type, _set_default_integration, _set_default_integration_or_exit, _snapshot_manifest_before_registration, _unregister_extensions_for_agent, _unregister_presets_for_agent, _write_integration_json
 
 
 def _missing_required_options(integration, parsed_options) -> list[str]:
@@ -35,8 +35,8 @@ def _missing_required_options(integration, parsed_options) -> list[str]:
 def integration_switch(
     target: str = typer.Argument(help="Integration key to switch to"),
     script: str | None = typer.Option(None, "--script", help="Script type: sh, ps, or py (default: from init-options.json or platform default)"),
-    force: bool = typer.Option(False, "--force", help="Force removal of modified files during uninstall of the previous integration"),
-    refresh_shared_infra: bool = typer.Option(False, "--refresh-shared-infra", help="Also overwrite shared infrastructure files even if you customized them (otherwise customizations are preserved)"),
+    force: bool = typer.Option(False, "--force", help="Force removal of modified files during uninstall of the previous integration; also overwrite modified or unowned extension resource copies when the target's skills are rendered"),
+    refresh_shared_infra: bool = typer.Option(False, "--refresh-shared-infra", help="Overwrite customized shared scripts, templates, and .specify/.gitignore, including when the target is already the default"),
     integration_options: str | None = typer.Option(None, "--integration-options", help='Options for the target integration'),
     trust_integration: bool = typer.Option(False, "--trust-integration", help="Authorize executing a reviewed external integration package without prompting"),
 ):
@@ -68,7 +68,7 @@ def integration_switch(
                 "to update managed files/options."
             )
             raise typer.Exit(1)
-        if force:
+        if force or refresh_shared_infra:
             raw_options, parsed_options = _resolve_integration_options(
                 target_integration, current, target, None
             )
@@ -112,12 +112,13 @@ def integration_switch(
             installed_keys,
             raw_options=raw_options,
             parsed_options=parsed_options,
-            refresh_templates_force=force,
+            refresh_templates_force=force or refresh_shared_infra,
         )
         manifest, unmodified_files = _snapshot_manifest_before_registration(project_root, target)
         _register_extensions_for_agent(
             project_root,
             target,
+            overwrite_modified=force,
             continuing=(
                 "The integration switch succeeded, but installed extensions may "
                 "need re-registration."
@@ -160,6 +161,13 @@ def integration_switch(
         )
         console.print("No files were changed.")
         raise typer.Exit(1)
+    _preflight_setup_or_exit(
+        target_integration,
+        project_root,
+        target_parsed_options,
+        selected_script,
+        "switch to",
+    )
 
     # Phase 1: Uninstall current integration (if any)
     if installed_key:
@@ -210,6 +218,7 @@ def integration_switch(
         _unregister_extensions_for_agent(
             project_root,
             installed_key,
+            preserve_modified=not force,
             continuing="Continuing with integration switch; old extension artifacts may need manual cleanup.",
         )
 
@@ -400,6 +409,7 @@ def integration_switch(
     _register_extensions_for_agent(
         project_root,
         target,
+        overwrite_modified=force,
         continuing="The integration switch succeeded, but installed extensions may need re-registration.",
     )
     _register_presets_for_agent(
